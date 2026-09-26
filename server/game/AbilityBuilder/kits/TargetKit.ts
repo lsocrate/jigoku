@@ -23,6 +23,11 @@ export interface LegacyTarget {
     name: string;
     kind: 'card' | 'select';
     props: Record<string, unknown>;
+    /**
+     * A card target before the last one whose candidates the effects of the step must be able to
+     * affect, when they target them directly (RRG "Target").
+     */
+    checkEffects?: boolean;
 }
 
 /** One slot of `.targets()`. Only `$target` creates it. */
@@ -31,6 +36,10 @@ export abstract class TargetSpec<R> {
 
     abstract compile(name: string, env: TargetEnv): LegacyTarget[];
     abstract read(context: AbilityContext, name: string): unknown;
+    /** A check for a slot that no player chooses: the ability can start only when it is true. */
+    requirement(_context: AbilityContext): boolean {
+        return true;
+    }
     /** The cards that this slot chose, for the legality check of the effects. */
     chosenCards(context: AbilityContext, name: string): BaseCard[] {
         const value = this.read(context, name);
@@ -209,6 +218,73 @@ class SelectTargetSpec<R> extends TargetSpec<R> {
     }
 }
 
+/** "Choose an opponent": with one opponent, no player chooses. */
+class OpponentTargetSpec extends TargetSpec<Player> {
+    compile(): LegacyTarget[] {
+        return [];
+    }
+
+    read(context: AbilityContext): unknown {
+        return context.player.opponent;
+    }
+
+    requirement(context: AbilityContext): boolean {
+        return context.player.opponent !== undefined;
+    }
+
+    chosenCards(): BaseCard[] {
+        return [];
+    }
+}
+
+interface NumberOptions<S extends State> {
+    min: number | ((ctx: FilterCtx<S>, util: Utils) => number);
+    max: number | ((ctx: FilterCtx<S>, util: Utils) => number);
+    chooser?: PlayerRef<S>;
+    prompt?: string;
+}
+
+/** "Choose a number": a select with one button for each number. */
+class NumberTargetSpec extends TargetSpec<number> {
+    constructor(private readonly options: NumberOptions<State>) {
+        super();
+    }
+
+    compile(name: string, env: TargetEnv): LegacyTarget[] {
+        const { min, max, chooser, prompt } = this.options;
+        const value = (amount: NumberOptions<State>['min'], context: AbilityContext) =>
+            typeof amount === 'function' ? amount(env.view(context) as FilterCtx<State>, env.util(context)) : amount;
+
+        const props: Record<string, unknown> = {
+            mode: TargetMode.Select,
+            choices: (context: AbilityContext) => {
+                const choices: Record<string, unknown> = {};
+                for(let number = value(min, context); number <= value(max, context); number++) {
+                    choices[String(number)] = () => true;
+                }
+                return choices;
+            }
+        };
+        if(chooser !== undefined) {
+            props.player = (context: AbilityContext) =>
+                relativePlayer(context, resolveRef(chooser, env.view(context), env.util(context)));
+        }
+        if(prompt) {
+            props.activePromptTitle = prompt;
+        }
+        return [{ name, kind: 'select', props }];
+    }
+
+    read(context: AbilityContext, name: string): unknown {
+        const label = context.selects[name]?.choice;
+        return label === undefined ? undefined : Number(label);
+    }
+
+    chosenCards(): BaseCard[] {
+        return [];
+    }
+}
+
 interface InOrderChoice<R> {
     readonly player: Player;
     readonly choice: R;
@@ -253,7 +329,7 @@ class InPlayerOrderSpec<R> extends TargetSpec<readonly InOrderChoice<R>[]> {
                 ) => boolean;
                 return condition(card, context);
             };
-            return { name: `${name}#${index}`, kind: 'card', props };
+            return { name: `${name}#${index}`, kind: 'card', props, checkEffects: index === 0 };
         });
     }
 
@@ -278,6 +354,8 @@ class InPlayerOrderSpec<R> extends TargetSpec<readonly InOrderChoice<R>[]> {
 interface DuelSideOptions<S extends State> {
     chooser?: PlayerRef<S>;
     prompt?: string;
+    /** "A character ... at any location": this side does not have to be participating. */
+    anyLocation?: boolean;
     filter?: (card: DrawCard, ctx: FilterCtx<S>, util: Utils) => boolean;
 }
 
@@ -307,7 +385,8 @@ class DuelTargetSpec extends TargetSpec<DuelChoice> {
     compile(name: string, env: TargetEnv): LegacyTarget[] {
         this.challengerIsSource = env.sourceIsCharacter;
         const requiresConflict = this.options.requiresConflict ?? true;
-        const canDuel = (card: undefined | DrawCard) => card !== undefined && (!requiresConflict || card.isParticipating());
+        const canDuel = (card: undefined | DrawCard, side: DuelSideOptions<State> = {}) =>
+            card !== undefined && (side.anyLocation || !requiresConflict || card.isParticipating());
 
         const side = (
             options: DuelSideOptions<State> = {},
@@ -319,7 +398,7 @@ class DuelTargetSpec extends TargetSpec<DuelChoice> {
                 cardType: CardType.Character,
                 controller,
                 cardCondition: (card: DrawCard, context: AbilityContext) =>
-                    canDuel(card) &&
+                    canDuel(card, options) &&
                     extra(card, context) &&
                     (!filter || filter(card, env.view(context) as FilterCtx<State>, env.util(context)))
             };
@@ -335,7 +414,7 @@ class DuelTargetSpec extends TargetSpec<DuelChoice> {
 
         const challenged = side(this.options.challenged, Players.Opponent, (card, context) => {
             const challenger = this.challengerOf(context, name);
-            return canDuel(challenger) && card !== challenger;
+            return canDuel(challenger, this.options.challenger) && card !== challenger;
         });
         if(this.challengerIsSource) {
             return [{ name: `${name}#challenged`, kind: 'card', props: challenged }];
@@ -387,6 +466,10 @@ export interface TargetKit<S extends State> {
         chooser?: PlayerRef<S>;
         prompt?: string;
     }): TargetSpec<keyof O & string>;
+    /** "Choose an opponent". With one opponent, no player chooses; the ability needs an opponent. */
+    opponent(): TargetSpec<Player>;
+    /** "Choose a number from min to max". */
+    number(options: NumberOptions<S>): TargetSpec<number>;
     /** Each player in turn order chooses. */
     inPlayerOrder<R>(
         build: (player: Player, $target: TargetKit<S>) => TargetSpec<R>
@@ -426,6 +509,8 @@ export const targetKit: TargetKit<State> = {
     select: (options) => new SelectTargetSpec(options.options, options.chooser, options.prompt) as never,
     inPlayerOrder: (build) =>
         new InPlayerOrderSpec(build as (player: Player, $target: TargetKit<State>) => TargetSpec<never>),
+    opponent: () => new OpponentTargetSpec(),
+    number: (options) => new NumberTargetSpec(options),
     militaryDuel: (options = {}) => new DuelTargetSpec('military', options),
     politicalDuel: (options = {}) => new DuelTargetSpec('political', options),
     gloryDuel: (options = {}) => new DuelTargetSpec('glory', options)

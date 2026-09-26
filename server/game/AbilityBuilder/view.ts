@@ -1,3 +1,5 @@
+import type { ResolutionHistory } from './adapter/ResolutionHistory.js';
+import type { Period } from './types.js';
 import type { AbilityContext } from '../AbilityContext.js';
 import type { Event } from '../Events/Event.js';
 import type { TriggeredAbilityContext } from '../TriggeredAbilityContext.js';
@@ -19,6 +21,8 @@ export class SlotTable {
     targets: Slot[] = [];
     /** Extra `ctx` fields of the ability, for example the duel of a duel window ability. */
     extras: Extras = {};
+    /** The uses of the ability, for `ctx.timesResolved`. */
+    history: undefined | ResolutionHistory;
     when: undefined | Record<string, WhenFn>;
 
     addCost(slot: Slot): void {
@@ -54,7 +58,7 @@ export function createView(chain: AbilityContext[], table: SlotTable, extras: Ex
     const root = chain[0];
     const current = chain[chain.length - 1];
 
-    const base = createBaseView(root, current);
+    const base = createBaseView(root, current, table.history);
     const costs = defineGetters(table.costs, (slot) => slot.read(root));
     const targets = defineGetters(table.targets, (slot) => {
         const context = chain[slot.step];
@@ -69,7 +73,7 @@ export function createView(chain: AbilityContext[], table: SlotTable, extras: Ex
         get: () => {
             const event = (root as TriggeredAbilityContext).event;
             const when = event ? table.when?.[event.name] : undefined;
-            return when ? when(event, createBaseView(root, root), createUtils(root)) : undefined;
+            return when ? when(event, createBaseView(root, root, table.history), createUtils(root)) : undefined;
         }
     });
     for(const [key, read] of Object.entries({ ...table.extras, ...extras })) {
@@ -79,7 +83,11 @@ export function createView(chain: AbilityContext[], table: SlotTable, extras: Ex
 }
 
 /** The context without costs and targets: for `when` and for `.condition()`. */
-export function createBaseView(root: AbilityContext, current: AbilityContext = root): object {
+export function createBaseView(
+    root: AbilityContext,
+    current: AbilityContext = root,
+    history?: ResolutionHistory
+): object {
     return {
         get game() {
             return root.game;
@@ -99,8 +107,11 @@ export function createBaseView(root: AbilityContext, current: AbilityContext = r
         get raw() {
             return current;
         },
-        timesResolved(): number {
-            throw new Error('Ability builder: timesResolved is not implemented yet');
+        timesResolved(period: Period): number {
+            if(!history) {
+                throw new Error('Ability builder: timesResolved is available only in triggered abilities');
+            }
+            return history.count(root.player, period);
         }
     };
 }

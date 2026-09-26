@@ -14,6 +14,8 @@ import type { AbilitySpec, StepSpec, Zone } from '../TriggeredBuilder.js';
 import { createUtils } from '../Utils.js';
 import { createBaseView, createView, SlotTable } from '../view.js';
 import { EffectsAction } from './EffectsAction.js';
+import { RecordingLimit, ResolutionHistory } from './ResolutionHistory.js';
+import * as AbilityLimit from '../../AbilityLimit.js';
 
 type Props = Record<string, unknown>;
 type Slots = [string, TargetSpec<unknown>][];
@@ -80,6 +82,7 @@ export class TriggeredCompiler {
         private readonly gained = false
     ) {
         this.table.when = spec.when as SlotTable['when'];
+        this.table.history = new ResolutionHistory(card.game);
         if(spec.kind === 'duelChallenge' || spec.kind === 'duelFocus' || spec.kind === 'duelStrike') {
             // The duel window abilities read the duel that is resolving.
             this.table.extras = { duel: (root) => (root as TriggeredAbilityContext).event.duel };
@@ -115,7 +118,9 @@ export class TriggeredCompiler {
             title: spec.title ?? this.card.name,
             ...this.stepProps(0, []),
             ...this.rootMessage(),
-            ...limits
+            ...limits,
+            // The default limit of a triggered ability is once per round (RRG "Limits of Triggered Abilities").
+            limit: new RecordingLimit(limits.limit ?? AbilityLimit.perRound(1), this.table.history as ResolutionHistory)
         };
 
         if(spec.when) {
@@ -123,14 +128,16 @@ export class TriggeredCompiler {
                 Object.entries(spec.when).map(([name, when]) => [
                     name,
                     (event: Event, context: AbilityContext) =>
-                        Boolean(call(when)(event, createBaseView(context), createUtils(context)))
+                        Boolean(call(when)(event, createBaseView(context, context, this.table.history), createUtils(context)))
                 ])
             );
         }
 
         const conflict = spec.conflict;
-        if(conflict || spec.conditions.length > 0) {
+        const requirements = this.slots[0].map(([, target]) => target);
+        if(conflict || spec.conditions.length > 0 || requirements.length > 0) {
             props.condition = (context: AbilityContext) =>
+                requirements.every((target) => target.requirement(context)) &&
                 (!conflict ||
                     conflictCondition(
                         context,
@@ -263,19 +270,34 @@ export class TriggeredCompiler {
         }
 
         const effects = this.effectsAction(step, slots, chain);
+        const stepEffects = step.effects;
+        for(const target of targets) {
+            if(target.checkEffects && stepEffects) {
+                const condition = target.props.cardCondition as (card: BaseCard, context: AbilityContext) => boolean;
+                target.props.cardCondition = (card: BaseCard, context: AbilityContext) =>
+                    condition(card, context) &&
+                    this.chosenCardsCanBeAffected(slots, context, this.actionsOf(stepEffects, chain(context)));
+            }
+        }
         const last = targets[targets.length - 1];
         if(!last) {
             return effects ? { gameAction: effects } : {};
         }
         if(effects && last.kind === 'select') {
-            const choices = last.props.choices as Record<string, unknown>;
-            for(const label of Object.keys(choices)) {
-                choices[label] = effects;
-            }
+            last.props.choices = this.choicesWith(last.props.choices, effects);
         } else if(effects) {
             last.props.gameAction = [effects];
         }
         return { targets: Object.fromEntries(targets.map((target) => [target.name, target.props])) };
+    }
+
+    /** Each choice of a select resolves the effects of the step, so an option is legal when they can change the game state. */
+    private choicesWith(choices: unknown, effects: EffectsAction): unknown {
+        const withEffects = (labels: Record<string, unknown>) =>
+            Object.fromEntries(Object.keys(labels).map((label) => [label, effects.asSelectChoice()]));
+        return typeof choices === 'function'
+            ? (context: AbilityContext) => withEffects(choices(context) as Record<string, unknown>)
+            : withEffects(choices as Record<string, unknown>);
     }
 
     /** The `then` of the old API: builds the next step when the previous step resolves. */

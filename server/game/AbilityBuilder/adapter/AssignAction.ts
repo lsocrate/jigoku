@@ -13,6 +13,13 @@ export interface AssignOptions {
     prompt?: string;
     /** The button labels of the roles. The default is the capitalized role key. */
     labels?: Record<string, string>;
+    /**
+     * "Chooses 1 of those cards - <role> the chosen card and <other role> the other": the chooser
+     * picks the card for this role from a menu of card buttons, and the other card gets the other role.
+     */
+    pick?: string;
+    /** Called when each card has its role, before the effects resolve. For example to print a message. */
+    onAssigned?: (assigned: Record<string, BaseCard>) => void;
 }
 
 type RoleActions = Record<string, (card: BaseCard) => undefined | GameAction>;
@@ -69,6 +76,7 @@ export class AssignAction extends GameAction {
         const finish = (role: string, card: BaseCard) => {
             const other = this.cards.find((candidate) => candidate !== card) as BaseCard;
             const otherRole = role === first ? second : first;
+            this.options.onAssigned?.({ [role]: card, [otherRole]: other });
             for(const [assigned, target] of [
                 [role, card],
                 [otherRole, other]
@@ -77,11 +85,25 @@ export class AssignAction extends GameAction {
             }
         };
 
-        if(possible.length === 1) {
+        const pick = this.options.pick;
+        if(pick) {
+            this.pickCard(pick, context, finish);
+        } else if(possible.length === 1) {
             this.chooseCard(possible[0], context, finish, false);
         } else {
             this.chooseRole([first, second], context, finish);
         }
+    }
+
+    private pickCard(role: string, context: AbilityContext, finish: (role: string, card: BaseCard) => void): void {
+        context.game.promptWithHandlerMenu(this.chooser(context), {
+            activePromptTitle: this.options.prompt ?? `Choose a card to ${this.label(role).toLowerCase()}`,
+            context,
+            cards: this.cards.filter((card) => this.roleCanAffect(role, card, context)),
+            cardHandler: (card: BaseCard) => finish(role, card),
+            choices: [],
+            handlers: []
+        });
     }
 
     private get chooser() {

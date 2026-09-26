@@ -1,7 +1,9 @@
 import type { AbilityContext } from '../AbilityContext.js';
 import AbilityDsl from '../abilitydsl.js';
 import type BaseCard from '../BaseCard.js';
-import { Location, Players } from '../Constants.js';
+import { EffectName, Location, Players } from '../Constants.js';
+import { EffectBuilder } from '../Effects/EffectBuilder.js';
+import Restriction from '../Effects/Restriction.js';
 import type DrawCard from '../DrawCard.js';
 import type { GameObject } from '../GameObject.js';
 import type Player from '../Player.js';
@@ -96,6 +98,23 @@ export class WheneverBuilder {
         }
         this.card.persistentEffect({ effect: AbilityDsl.effects.delayedEffect(properties) });
     }
+}
+
+// ---- Play restrictions ----
+
+/**
+ * "Play only if X": while X is false, the card cannot be played, from any location. The check
+ * gets the context of the play, so "you" is the player who plays the card.
+ */
+export function addPlayRestriction(card: BaseCard, condition: Fn): void {
+    const cannotPlay = new Restriction({
+        type: 'play',
+        restricts: (context: AbilityContext) => !condition(view(context), createUtils(context))
+    });
+    card.persistentEffect({
+        location: Location.Any,
+        effect: EffectBuilder.card.static(EffectName.AbilityRestrictions, cannotPlay)
+    });
 }
 
 // ---- Constant abilities ----

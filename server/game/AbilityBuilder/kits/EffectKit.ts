@@ -1,7 +1,7 @@
 import type { AbilityContext } from '../../AbilityContext.js';
 import type BaseCard from '../../BaseCard.js';
 import type DrawCard from '../../DrawCard.js';
-import { Duration, DuelType } from '../../Constants.js';
+import { Duration, DuelType, Location, PlayType } from '../../Constants.js';
 import type { Duel } from '../../Duel.js';
 import type { EffectFactory } from '../../Effects/EffectBuilder.js';
 import { GameAction } from '../../GameActions/GameAction.js';
@@ -15,7 +15,8 @@ import type { GameEvent } from '../../Events/EventPayloads.js';
 import type Ring from '../../Ring.js';
 import { AssignAction, type AssignOptions } from '../adapter/AssignAction.js';
 import { ChosenAction } from '../adapter/ChosenAction.js';
-import { EffectsAction } from '../adapter/EffectsAction.js';
+import { ChooseNumberAction, type ChooseNumberOptions } from '../adapter/ChooseNumberAction.js';
+import { EffectsAction, markChoiceBranch } from '../adapter/EffectsAction.js';
 import {
     formatted,
     messageKit,
@@ -25,6 +26,7 @@ import {
     type MessageResult,
     type MessageSpec
 } from './MessageKit.js';
+import { MayAction, type MayOptions } from '../adapter/MayAction.js';
 import { MayPayAction, type Payment } from '../adapter/MayPayAction.js';
 import type CardAbility from '../../CardAbility.js';
 import { createModifierKit, modFactories, type Mod, type ModifierKit, type ModTarget } from './ModifierKit.js';
@@ -209,6 +211,11 @@ function isList<T>(value: T | readonly T[]): value is readonly T[] {
     return Array.isArray(value);
 }
 
+/** The current locations of the cards, for the actions that check where their target is. */
+function locationsOf(cards: Many<BaseCard>): Location[] {
+    return [...new Set(target(cards).map((card) => card.location))];
+}
+
 /** The old action of a delayed effect: picks the branch and prints its announcement when it triggers. */
 function delayedAction(anchor: undefined | BaseCard | Player, options: DelayedOptions, multipleTrigger: boolean): undefined | GameAction {
     if(!anchor) {
@@ -266,6 +273,34 @@ export function createEffectKit(context: AbilityContext) {
         discardFromPlay: (cards: Many<BaseCard>) => node(GameActions.discardFromPlay({ target: target(cards) })),
         discard: (cards: Many<BaseCard>) => node(GameActions.discardCard({ target: target(cards) })),
         flipDynasty: (cards: Many<BaseCard>) => node(GameActions.flipDynasty({ target: target(cards) })),
+        /**
+         * "Play that card as if it were in your hand". With `givingEphemeral`, the card is removed from
+         * the game after it is played (Ephemeral gained from this effect).
+         */
+        playAsIfFromHand: (card: undefined | DrawCard, options: { givingEphemeral?: boolean } = {}) =>
+            node(card
+                ? GameActions.playCard({
+                    target: card,
+                    playType: PlayType.PlayFromHand,
+                    source: context.source,
+                    resetOnCancel: true,
+                    ...(options.givingEphemeral
+                        ? {
+                            postHandler: (played: AbilityContext) => {
+                                context.game.addMessage('{0} is removed from the game by {1}\'s ability', played.source, context.source);
+                                context.player.moveCard(played.source, Location.RemovedFromGame);
+                            }
+                        }
+                        : {})
+                })
+                : undefined),
+
+        /** Shuffle the cards into their deck, from where they are now. */
+        shuffleIntoDeck: (cards: Many<BaseCard>) =>
+            node(GameActions.returnToDeck({ target: target(cards), shuffle: true, location: locationsOf(cards) })),
+        /** Remove the cards from the game, from where they are now. */
+        removeFromGame: (cards: Many<BaseCard>) =>
+            node(GameActions.removeFromGame({ target: target(cards), location: locationsOf(cards) })),
         putOnBottomOfDeck: (cards: Many<BaseCard>) =>
             node(GameActions.returnToDeck({ target: target(cards), bottom: true })),
         removeFate: (cards: Many<BaseCard>, amount = 1) =>
@@ -292,6 +327,31 @@ export function createEffectKit(context: AbilityContext) {
 
         claimRingAsPolitical: (ring: undefined | Ring, options: { gainFate?: boolean } = {}) =>
             node(ring ? GameActions.claimRing({ target: ring, type: 'political', takeFate: options.gainFate ?? false }) : undefined),
+
+        /**
+         * "Choose a number" while the effect resolves. The `announce` message prints when the number
+         * is chosen. Prefer `$target.number` when the card chooses the number before the dash.
+         */
+        chooseNumber: (
+            options: ChooseNumberOptions & { chooser?: Player; announce?: ($message: MessageKit, amount: number) => MessageSpec },
+            effect: (amount: number) => EffectNode
+        ) => {
+            const announce = options.announce;
+            return node(
+                new ChooseNumberAction(options.chooser ?? context.player, options, (amount) => {
+                    const action = EffectNode.actionOf(effect(amount));
+                    if(!action || !announce) {
+                        return action;
+                    }
+                    return GameActions.multiple([
+                        GameActions.handler({
+                            handler: () => context.game.addMessage('{0}', formatted(context.game, announce(messageKit, amount)))
+                        }),
+                        action
+                    ]);
+                })
+            );
+        },
 
         /** "Choose a ring - ...": a choice while the effect resolves. */
         chooseRing: (options: ChooseRingOptions, effect: (ring: Ring) => EffectNode) => {
@@ -363,6 +423,12 @@ export function createEffectKit(context: AbilityContext) {
                     : undefined
             ),
 
+        /** "X may do Y". The player decides when this effect resolves. */
+        may: (player: undefined | Player, effect: EffectNode, options: MayOptions) => {
+            const action = EffectNode.actionOf(effect);
+            return node(player && action ? new MayAction(player, action, options) : undefined);
+        },
+
         /** "You may pay X to Y". The player decides when this effect resolves. */
         mayPay: (player: undefined | Player, payment: ($payment: PayKit) => Payment, effect: EffectNode) =>
             node(player
@@ -377,25 +443,57 @@ export function createEffectKit(context: AbilityContext) {
             if(options.twice && context.subResolution) {
                 return node(undefined);
             }
+            // In a "then" step, `context.ability` is the step. The card ability is on the triggering context.
+            const root = context.triggeringContext;
             const action = GameActions.resolveAbility({
-                target: context.source,
-                ability: context.ability as CardAbility,
+                target: root.source,
+                ability: root.ability as CardAbility,
                 subResolution: true,
                 player: options.player,
-                choosingPlayerOverride: context.choosingPlayerOverride ?? undefined
+                choosingPlayerOverride: root.choosingPlayerOverride ?? undefined
             });
             return new EffectNode(action, context, 'resolve this ability again');
         },
 
-        /** "Honor one of those characters and dishonor the other". */
-        assign: <C extends BaseCard>(cards: readonly C[], roles: Record<string, (card: C) => EffectNode>, options: AssignOptions = {}) =>
-            node(new AssignAction(
+        /**
+         * "Honor one of those characters and dishonor the other". `announce` prints when each card has
+         * its role.
+         */
+        assign: <C extends BaseCard, R extends string>(
+            cards: readonly C[],
+            roles: Record<R, (card: C) => EffectNode>,
+            options: Omit<AssignOptions, 'pick' | 'onAssigned'> & {
+                pick?: NoInfer<R>;
+                announce?: ($message: MessageKit, assigned: Record<NoInfer<R>, C>) => MessageSpec;
+            } = {}
+        ) => {
+            const { announce, ...assignOptions } = options;
+            return node(new AssignAction(
                 cards,
                 Object.fromEntries(
-                    Object.entries(roles).map(([role, build]) => [role, (card: BaseCard) => EffectNode.actionOf(build(card as C))])
+                    Object.entries<(card: C) => EffectNode>(roles).map(([role, build]) => [
+                        role,
+                        (card: BaseCard) => EffectNode.actionOf(build(card as C))
+                    ])
                 ),
-                options
-            )),
+                {
+                    ...assignOptions,
+                    onAssigned: announce
+                        ? (assigned) =>
+                            context.game.addMessage('{0}', formatted(context.game, announce(messageKit, assigned as Record<R, C>)))
+                        : undefined
+                }
+            ));
+        },
+
+        /**
+         * The effect for the option chosen with `$target.select`. Only this effect decides whether an
+         * option can be chosen, so other effects in the list do not make every option legal.
+         */
+        forChoice: <K extends string>(choice: undefined | K, branches: Record<K, EffectNode>) => {
+            const action = choice === undefined ? undefined : EffectNode.actionOf(branches[choice]);
+            return node(action ? markChoiceBranch(action) : undefined);
+        },
 
         /** "If X, Y" inside one effect. */
         if: (condition: boolean, effect: EffectNode) => (condition ? effect : node(undefined)),

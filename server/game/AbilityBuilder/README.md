@@ -44,8 +44,25 @@ this.ability
 | `duelChallenge()`, `duelFocus()`, `duelStrike()`                                                             | **Duel Challenge:**, … (`ctx.duel` is the duel that resolves)                                                                                                                                        |
 | `constant()`, `composure()`, `dire()`                                                                        | a constant ability; the keyword ones keep working under "loses all non-keyword abilities"                                                                                                            |
 | `whenever(condition)`                                                                                        | "If X, do Y" without a timing word (Hantei XXXVIII: "If an opponent has the Imperial Favor, discard this character.")                                                                                |
+| `playOnlyIf(condition)`                                                                                      | "Play only if …". The check uses the player who plays the card, so it also works when an opponent plays it                                                                                           |
 
 `when` is an object with event names as keys. The event parameter is typed from the key, and `ctx.event` is typed in all later callbacks. A `when` function can return an object instead of `true`; that object is `ctx.matched`.
+
+With several triggers, `ctx.event` is the union of the events. Return the matched card from each trigger, so the effects do not depend on which event fired:
+
+```ts
+// Let Him Go By: "After a character controlled by an opponent is played into a conflict or moved to a conflict – bow it."
+this.ability
+    .reaction({
+        onMoveToConflict: (event, ctx) => (event.card.controller === ctx.opponent ? event.card : undefined),
+        onCardPlayed: (event, ctx) =>
+            event.card.controller === ctx.opponent && event.card.isParticipating() ? event.card : undefined
+    })
+    .effects(($effect, ctx) => [$effect.bow(ctx.matched)])   // ctx.matched: DrawCard
+    .addPrinted();
+```
+
+The same works for `interrupt`, `wouldInterrupt` and the forced versions.
 
 For a printed "Conflict Action", the card with the text gives the meaning. For a gained ability, the card that gains it gives the meaning.
 
@@ -71,13 +88,17 @@ Each builder step is its own interface, so the compiler rejects a wrong order.
 
 - `.costs(($cost) => ({ name: $cost.x(...) }))` gives `ctx.costs.name`. In target filters the costs can be unpaid, so they are `Partial`.
 - `.costsBeforeTargets(...)` pays the costs first (RRG steps 4 and 5). Target filters then see paid costs. Without an argument, only the fate cost of the card is paid first.
+- `ctx.timesResolved(period)` counts the uses of this ability by the player in the period (`'conflict'`, `'phase'`, `'round'`, `'game'`). A use counts once its costs are paid, so a cost sees the earlier uses and the announcement also sees this one. The count restarts when the card changes zones (RRG: a new instance of the card). Isawa Hifumi: `$cost.fateFromCharacters((ctx) => ctx.timesResolved('round'))`.
 - `.targets(($target) => ({ name: $target.x(...) }))` gives `ctx.targets.name`.
     - Slots in one call are independent. A later call depends on the earlier calls (For Shame!: first the character, then the opponent's choice).
     - All target choices happen before the dash, in the same timing step.
 - Card targets use a kind: `$target.card('character', …)` gives a `DrawCard`, `'province'` gives a `ProvinceCard`. Multi-card targets are always arrays.
 - `from: (ctx, util) => cards` chooses from those cards (a discard pile, outside the game). Leave it out for cards in play.
-- `controller` and `chooser` take a `Player` or a function that returns one.
-- `$target.select({ options: { key: 'Label' } })` gives the typed key. An option is legal when the effects with that option can change the game state.
+- `controller` and `chooser` take a `Player` or a function that returns one, for example an earlier target (Levy: `chooser: (ctx) => ctx.targets.opponent`).
+- `$target.opponent()` is "choose an opponent". With one opponent, no player chooses; the ability needs an opponent.
+- `$target.number({ min, max })` is "choose a number" before the dash.
+- `$target.inPlayerOrder((player, $target) => …)` is "each player in turn order chooses". Use `optionalCard` for "may choose". The result is in turn order, so the effects can use the position ("ready the first chosen character, honor the second").
+- `$target.select({ options: { key: 'Label' } })` gives the typed key. An option is legal when the effects with that option can change the game state. Put the effect that depends on the option in `$effect.forChoice(ctx.targets.key, { … })`: then only that effect decides, and the other effects in the list do not make every option legal (Levy: the draw does not make "give 1 fate" legal when the opponent has no fate).
 
 ### Effects
 
@@ -85,8 +106,12 @@ Each builder step is its own interface, so the compiler rejects a wrong order.
 - In `.effects()`, `ctx.costs` is `Partial`: the engine also runs the effects before the costs are paid, to check the ability can change the game state.
 - `$effect` helpers accept `undefined` and empty arrays; they then do nothing.
 - A chosen card that an effect targets directly must be affectable by it (RRG "Target"). Other chosen cards are references.
-- Some building blocks: `if`, `ifAble(...).otherwise(...)`, `mayPay`, `resolveThisAbility`, `assign`, `instead`, `cancel`, `delayed`, `eachTime`, `lastingEffect`, `chooseRing`. See `kits/EffectKit.ts`.
-- `$effect.mayPay` asks when its own effect resolves, after the effects before it in the list apply.
+- Some building blocks: `if`, `ifAble(...).otherwise(...)`, `forChoice`, `may`, `mayPay`, `resolveThisAbility`, `assign`, `instead`, `cancel`, `delayed`, `eachTime`, `lastingEffect`, `chooseRing`, `chooseNumber`, `playAsIfFromHand`. See `kits/EffectKit.ts`.
+- `$effect.may` and `$effect.mayPay` ask when their own effect resolves, after the effects before them in the list apply.
+- `$effect.resolveThisAbility` resolves the card ability, also from a "then" step (Hand to Hand: "Then, your opponent may resolve this ability.").
+- `$effect.assign(cards, roles, { chooser?, pick?, announce? })`: with `pick`, the chooser picks the card for that role from card buttons, and the other card gets the other role (Nightingale Tattoo).
+- `$effect.instead([...])` is a replacement effect. The replacement can affect any card, for example the source (Akodo Kaede: "remove 1 fate from this character instead").
+- `$effect.shuffleIntoDeck` and `$effect.removeFromGame` work on cards where they are now (a discard pile, a deck, play).
 
 ### "Then" steps
 
@@ -113,6 +138,7 @@ The characters of a duel are targets (RRG "Duel", D.1). A duel is a target plus 
 ```
 
 - When the ability is on a character, that character is the challenger and is not chosen.
+- Both characters must be participating. `challenged: { anyLocation: true }` is "a character … at any location".
 - `outcome.winner` and `outcome.loser` are arrays, empty on a tie.
 - Options: `statistic` ("using base military skill"), `duelistModifiers` ("giving each dueling character +1…"), `announce` (prints "Duel Effect: <text>").
 - `$effect.militaryDuel(challenger, challenged, consequences)` is for a duel that starts in the effect ("your character challenges…").
@@ -136,6 +162,7 @@ this.ability
 ```
 
 - Subjects: `self`, `attachedCharacter`, `cards(kind, { in, controller, filter })`, `you`, `opponent`, `eachPlayer`, `conflict`.
+- `this.ability.playOnlyIf((ctx, util) => …)` is "Play only if …". It is a constant restriction on the card; its check gets the context of the play.
 - Modifiers are typed by the subject: card, player and conflict modifiers cannot mix.
 - `$modifier.gainAbility(($ability) => $ability.conflictAction()….build())` gives an ability to the subject. Its `ctx.source` is the card that gains it.
 - Printed keywords come from the card text; card code does not declare them.
@@ -168,13 +195,18 @@ this.ability
 | `Utils.ts`                    | `util`                                                                                                           |
 | `kits/`                       | one file for each kit                                                                                            |
 | `adapter/compileTriggered.ts` | compiles a triggered spec into old props (targets, costs, `then`, messages)                                      |
-| `adapter/*Action.ts`          | old-style game actions for the building blocks (`EffectsAction`, `AssignAction`, `MayPayAction`, `ChosenAction`) |
+| `adapter/*Action.ts`          | old-style game actions for the building blocks (`EffectsAction`, `AssignAction`, `MayAction`, `MayPayAction`, `ChooseNumberAction`, `ChosenAction`) |
+| `adapter/ResolutionHistory.ts` | the uses of an ability for `ctx.timesResolved`, recorded by a wrapper around the ability limit                   |
+| `adapter/FriendlyFateCost.ts` | "remove fate from friendly characters", with the fate-payment prompts of `ReduceableFateCost`                    |
 
 ### How the adapter works
 
 - `ctx` is a view with getters over the live old contexts. For a "then" step, it reads the earlier targets from the parent contexts.
 - The effects of a step become one `EffectsAction`. It runs the effects callback again for each context it gets (legality copies, resolution). It is attached to the last target, or to the ability when the step has no targets.
 - Targets of a step form a chain with `dependsOn`, so an earlier target is legal only when the later ones can still be chosen.
+- For the targets of `inPlayerOrder`, the earlier target also checks that the effects can affect its candidates, in its card condition (the effects are attached only to the last target).
+- Each ability limit is wrapped in a `RecordingLimit`. The engine increments the limit after the costs are paid and resets it when the card changes zones; the wrapper records each use for `ctx.timesResolved`.
+- For a select, each option gets the effects as its action. With `forChoice`, only the `forChoice` effect decides whether the option is legal.
 - `from:` becomes `location: Any` with a check that the card is in the list. `Player` values become `Players.Self` or `Players.Opponent` for the context.
 
 ## Known limits
@@ -182,7 +214,9 @@ this.ability
 - The first step cannot announce only freeform text or nothing.
 - `.otherwise()` branches cannot choose targets.
 - `inPlayerOrder` supports two players.
-- `ctx.timesResolved` is not implemented.
+- `ctx.timesResolved('game')` also restarts when a limit with a period resets (for example at the end of the round for `$limit.per('round', 1)`).
+- The RRG "a chosen card must be affectable" check for targets before the last one is only done for `inPlayerOrder`.
+- Seven Stings Keep chooses its number after the dash (`$effect.chooseNumber`), because its spec expects it; the card text puts it before the dash (`$target.number`).
 - Hantei XXXVIII does not reach targets chosen after "then".
 - `$effect.mayPay` and "to" do not use the RRG timing (decide before the effects, resolve at the same time).
 - Duels: no `refusal`; with the "printed skill" duel rules, `duelistModifiers` do not change the counted value; no gained duel window abilities.
@@ -191,12 +225,9 @@ this.ability
 
 ## Next steps
 
-1. **Second batch of cards**, to cover the parts that no card uses yet:
-    - Levy 2, Seven Stings Keep, Keeper Initiate (needs a spec), A Matsu Proves Their Worth, Hand to Hand: `$target.opponent()`, `$target.number()`, `.ifYouDo()`, `ctx.matched`, `$effect.may`.
-    - Akodo Kaede, Jak'ithith, Nightingale Tattoo, Reckless Avenger, Isawa Hifumi: `instead` on the source, `util.onEnemySide`, `assign` with another chooser, optional `inPlayerOrder`, `ctx.timesResolved`, fate costs spread across characters.
-2. **Lint rule**: report `Constants` imports in files that use `this.ability`.
-3. **Migrate `20-Core2`**, one clan for each PR. Add building blocks as the cards need them.
-4. **Internals (phase B)**, with the builder as the only spec:
+1. **Lint rule**: report `Constants` imports in files that use `this.ability`.
+2. **Migrate `20-Core2`**, one clan for each PR. Add building blocks as the cards need them. No card uses `$target.number()` or `.ifYouDo()` yet.
+3. **Internals (phase B)**, with the builder as the only spec:
     - store cost results by slot name; remove the `setDefaultTarget` mutation and the `any` in action callbacks;
     - compute "can be mirrored" from the ability, and delete `cannotBeMirrored`;
     - delayed replacements ("would" + `instead`) for Display of Power, The Empty City, Pilgrimage;
@@ -204,4 +235,4 @@ this.ability
     - RRG timing for "may" and "to";
     - Ephemeral and Peaceful as gained keywords;
     - the known limits above.
-5. **Later**: the other card sets, then make the old props API internal.
+4. **Later**: the other card sets, then make the old props API internal.

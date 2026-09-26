@@ -23,7 +23,10 @@ export default class ForShame extends DrawCard {
                 })
             }))
             .effects(($effect, ctx) => [
-                ctx.targets.choice === 'dishonor' ? $effect.dishonor(ctx.targets.character) : $effect.bow(ctx.targets.character)
+                $effect.forChoice(ctx.targets.choice, {
+                    dishonor: $effect.dishonor(ctx.targets.character),
+                    bow: $effect.bow(ctx.targets.character)
+                })
             ])
             .addPrinted();
     }

@@ -3,6 +3,7 @@ import AbilityDsl from '../../abilitydsl.js';
 import type BaseCard from '../../BaseCard.js';
 import { CardType } from '../../Constants.js';
 import type { Cost } from '../../costs/Cost.js';
+import { FriendlyFateCost } from '../adapter/FriendlyFateCost.js';
 import type { Utils } from '../Utils.js';
 import type { CardFor, CardKindInput, FilterCtx, State } from '../types.js';
 
@@ -54,9 +55,16 @@ export interface CostKit<S extends State> {
     payHonor(amount?: number): CostSpec<void>;
     /** "name a card": the result is the name. */
     nameCard(): CostSpec<string>;
+    /** "Remove X fate from (friendly) characters". */
+    fateFromCharacters(amount: (ctx: FilterCtx<S>, util: Utils) => number): CostSpec<void>;
 }
 
 export const costKit: CostKit<State> = {
+    fateFromCharacters: (amount) =>
+        new CostSpec(
+            (env) => new FriendlyFateCost((context) => amount(env.view(context) as FilterCtx<State>, env.util(context))),
+            undefined
+        ),
     bowSelf: () => new CostSpec(() => AbilityDsl.costs.bowSelf(), undefined),
     dishonor: (kind, options = {}) =>
         new CostSpec(

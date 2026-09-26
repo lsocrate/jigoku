@@ -4,6 +4,14 @@ import { GameAction } from '../../GameActions/GameAction.js';
 import type { MessageArgs } from '../../GameChat.js';
 import type { GameObject } from '../../GameObject.js';
 
+const choiceBranches = new WeakSet<GameAction>();
+
+/** Marks the action of `$effect.forChoice`: the effect that depends on the option of a select. */
+export function markChoiceBranch(action: GameAction): GameAction {
+    choiceBranches.add(action);
+    return action;
+}
+
 /**
  * One old-style game action that runs the effects callback of a builder step.
  *
@@ -16,9 +24,19 @@ export class EffectsAction extends GameAction {
     constructor(
         private readonly build: (context: AbilityContext) => readonly GameAction[],
         /** An extra legality check, for example that each chosen card can be affected. */
-        private readonly check: (context: AbilityContext, actions: readonly GameAction[]) => boolean = () => true
+        private readonly check: (context: AbilityContext, actions: readonly GameAction[]) => boolean = () => true,
+        /**
+         * The action of one option of a select. When the effects contain `$effect.forChoice`, only
+         * that effect decides whether the option can change the game state (RRG "Select").
+         */
+        private readonly selectChoice = false
     ) {
         super({});
+    }
+
+    /** The same effects, as the action of one option of a select. */
+    asSelectChoice(): EffectsAction {
+        return new EffectsAction(this.build, this.check, true);
     }
 
     actions(context: AbilityContext): readonly GameAction[] {
@@ -34,8 +52,10 @@ export class EffectsAction extends GameAction {
 
     hasLegalTarget(context: AbilityContext, additionalProperties = {}): boolean {
         const actions = this.actions(context);
+        const branches = this.selectChoice ? actions.filter((action) => choiceBranches.has(action)) : [];
+        const deciding = branches.length > 0 ? branches : actions;
         return (
-            actions.some((action) => action.hasLegalTarget(context, additionalProperties)) &&
+            deciding.some((action) => action.hasLegalTarget(context, additionalProperties)) &&
             this.check(context, actions)
         );
     }

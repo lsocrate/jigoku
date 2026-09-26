@@ -1,7 +1,7 @@
 import type BaseCard from '../BaseCard.js';
 import type DrawCard from '../DrawCard.js';
 import { TriggeredCompiler } from './adapter/compileTriggered.js';
-import { ConstantBuilder, WheneverBuilder, type Constant, type Whenever } from './ConstantBuilder.js';
+import { addPlayRestriction, ConstantBuilder, WheneverBuilder, type Constant, type Whenever } from './ConstantBuilder.js';
 import type { GainedSupport } from './kits/ModifierKit.js';
 import { AbilityType } from '../Constants.js';
 import { limitKit, type FinishOptions } from './kits/LimitKit.js';
@@ -119,6 +119,8 @@ export interface PrintedAbilityEntry<Src extends BaseCard> extends AbilityEntry<
     dire(): Constant<Src>;
     /** "If X, do Y" without a timing word: the game checks it all the time. */
     whenever(condition: (ctx: BaseCtx<Src>, util: Utils) => boolean): Whenever<Src>;
+    /** "Play only if X". */
+    playOnlyIf(condition: (ctx: BaseCtx<Src>, util: Utils) => boolean): void;
 }
 
 /** The entry point for the printed abilities of a card: `this.ability`. */
@@ -126,6 +128,7 @@ export function printedAbilityEntry<Src extends BaseCard>(card: Src): PrintedAbi
     return {
         ...createEntry<Src, 'printed'>({ limitKit, register: (spec, limits) => register(card, spec, limits) }),
         whenever: (condition) => new WheneverBuilder(card, condition as never) as never,
+        playOnlyIf: (condition) => addPlayRestriction(card, condition as never),
         constant: () => new ConstantBuilder(card, gainedCompiler(card)) as never,
         composure: () =>
             new ConstantBuilder(card, gainedCompiler(card), true).while((ctx) =>

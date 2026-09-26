@@ -43,6 +43,9 @@ const conflict = (factory: EffectFactory) => factory as Mod<'conflict'>;
 export function createModifierKit(gained: GainedSupport) {
     return {
         // ---- Card modifiers ----
+        addTrait: (trait: string) => card(AbilityDsl.effects.addTrait(trait)),
+        /** "Becomes a copy of that character". */
+        copyOf: (original: DrawCard) => card(AbilityDsl.effects.copyCard(original)),
         blank: () => card(AbilityDsl.effects.blank()),
         military: (amount: number) => card(AbilityDsl.effects.modifyMilitarySkill(amount)),
         political: (amount: number) => card(AbilityDsl.effects.modifyPoliticalSkill(amount)),
@@ -51,6 +54,9 @@ export function createModifierKit(gained: GainedSupport) {
             card(AbilityDsl.effects.cardCannot({ cannot: 'ready', restricts: 'cardEffects' })),
         cannotTriggerAbilities: () => card(AbilityDsl.effects.cannotTriggerAbilities()),
         immuneTo: (source: ImmunitySource) => card(AbilityDsl.effects.immunity({ restricts: source })),
+        /** "Immune to <Trait> card effects": effects from cards with the trait cannot target or affect this card. */
+        immuneToCardsWithTrait: (trait: string) => card(AbilityDsl.effects.immunity({ restricts: trait })),
+        cannotReceiveTaintedToken: () => card(AbilityDsl.effects.cannotReceiveTaintedToken()),
         loseAllNonKeywordAbilities: () => card(AbilityDsl.effects.loseAllNonKeywordAbilities()),
         /** "As an additional cost to declare this character as an attacker or defender, you lose X honor." */
         honorCostToDeclare: (amount: number) => card(AbilityDsl.effects.honorCostToDeclare({ amount })),
@@ -73,6 +79,8 @@ export function createModifierKit(gained: GainedSupport) {
         conflictElementsToResolve: (amount: number) => conflict(AbilityDsl.effects.modifyConflictElementsToResolve(amount)),
 
         // ---- Player modifiers ----
+        /** "Your opponent declares defenders for this conflict. Then declare the conflict with that many attackers." */
+        defendersChosenFirst: (attackers: number) => player(AbilityDsl.effects.defendersChosenFirstDuringConflict(attackers)),
         /** Cards that match cost less to play from a province. */
         reduceCostWhenPlayedFromProvince: (amount: number, match: (card: DrawCard, source: BaseCard) => boolean) =>
             player(AbilityDsl.effects.reduceCost({ amount, match, playingTypes: PlayType.PlayFromProvince }))
